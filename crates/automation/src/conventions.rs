@@ -10,7 +10,9 @@ pub(crate) const MAX_BATCH_STEPS: usize = 1000;
 impl Automation {
     pub(crate) fn command_run(&mut self, args: &Args) -> Result<Vec<Content>> {
         let id = args.str("id")?;
-        let tool = tools::tool_for_command(id).ok_or_else(|| failed(format!("command {id:?} has no headless tool; see command_list")))?;
+        let tool = tools::tool_for_command(id).ok_or_else(|| {
+            failed(format!("Unknown command id {id:?}; steps take ids from command_list, and headless tools are run directly by their tool name"))
+        })?;
         let def = tools::find(tool).ok_or_else(|| failed("command tool is unavailable"))?;
         let mut params = match args.get("params") {
             None | Some(Value::Null) => serde_json::Map::new(),
@@ -114,7 +116,7 @@ impl Automation {
             return Err(failed("page has invalid dimensions"));
         }
         let scale = (max as f32 / side).min(1.0);
-        let out = self.renderer(id)?.render(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale, tag: 0 });
+        let out = self.renderer(id)?.render(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale, tag: 0, preview: false });
         if let Some(error) = out.error {
             return Err(failed(error));
         }
