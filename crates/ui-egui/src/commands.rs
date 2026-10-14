@@ -123,13 +123,15 @@ impl PdfCraftApp {
                     };
                     crate::i18n::fmt(tl!("This document has no {kind} to change"), &[("kind", kind)])
                 }
+                // Restricted documents ask for their permissions password instead, so only an
+                // unprotected or a read-only document gets here.
                 commands::Needs::Security | commands::Needs::ProtectedSecurity if self.active.is_some() => {
-                    if self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.allows_security_change()) {
-                        tl!("This document isn't password-protected").to_string()
-                    } else {
-                        tl!("Only the document's owner can change its security (open it with the permissions password)").to_string()
+                    match self.active_ids().and_then(|(_, id)| self.session.get(id)) {
+                        Some(d) if !d.allows_security_change() => crate::i18n::fmt(tl!("{name} is read-only"), &[("name", &d.name)]),
+                        _ => tl!("This document isn't password-protected").to_string(),
                     }
                 }
+                commands::Needs::Unlock if self.active.is_some() => tl!("This document has no restrictions to lift").to_string(),
                 commands::Needs::Assembly | commands::Needs::Modification | commands::Needs::Annotate if self.active.is_some() => {
                     tl!("The document's security settings don't allow this change").to_string()
                 }
@@ -173,6 +175,12 @@ impl PdfCraftApp {
             "file.revert" => self.dialog = Some(Dialog::Revert),
             "file.properties" => self.dialog = Some(Dialog::Properties(PropsTab::Description)),
             "protect.properties" => self.dialog = Some(Dialog::Properties(PropsTab::Security)),
+            // A restricted document's security changes once its permissions password is entered.
+            "protect.password" | "protect.remove" if self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.can_unlock()) => {
+                let then = if id == "protect.password" { "protect.password" } else { "protect.remove" };
+                self.request_unlock(Some(then));
+            }
+            "protect.unlock" => self.request_unlock(None),
             "protect.password" => {
                 self.protect_draft = Default::default();
                 self.dialog = Some(Dialog::Protect);
@@ -252,6 +260,8 @@ impl PdfCraftApp {
                 }
             }
             "view.read_mode" => self.switch_mode(if self.mode == Mode::Read { Mode::AllTools } else { Mode::Read }, false),
+            "view.next_tab" => self.step_tab(true),
+            "view.previous_tab" => self.step_tab(false),
             "view.theme" => {
                 let next = if self.theme == ThemeKind::Light { ThemePreference::Dark } else { ThemePreference::Light };
                 self.set_theme_preference(next);
@@ -385,7 +395,13 @@ impl PdfCraftApp {
                 }
             }
             "a11y.report" => self.show_accessibility_report(),
+            "a11y.autotag" => {
+                if self.apply_edit(pdfcraft_engine::Edit::AutoTagText) {
+                    self.choose_right_panel(Some(RightPanel::Tags));
+                }
+            }
             "a11y.alt_text" => self.start_alt_text(),
+            "a11y.tags" => self.choose_right_panel(Some(RightPanel::Tags)),
             "a11y.reading_options" => self.dialog = Some(Dialog::Properties(crate::PropsTab::Advanced)),
             "export.all_images" => self.dialog = Some(Dialog::Export(crate::export_ui::ExportKind::AllImages)),
             "edit.text" => {
@@ -399,9 +415,7 @@ impl PdfCraftApp {
                 self.notify_tr("Drag a rectangle to create a link; double-click a link to edit it");
             }
             "edit.links_from_urls" => self.links_from_urls(),
-            "edit.remove_links" => {
-                self.apply_edit(Edit::RemoveLinks { pages: None });
-            }
+            "edit.remove_links" => self.remove_all_links(),
             "redact.mark" => {
                 self.quick_tool = crate::QuickTool::Redact;
                 self.left = crate::LeftPanel::Tool("redact");
@@ -504,6 +518,7 @@ impl PdfCraftApp {
             "form.export_data" => self.export_data_dialog(false, true),
             "form.merge_data" => self.merge_data_dialog(),
             "export.docx" => self.export_office_dialog(pdfcraft_engine::compare::OfficeFormat::Docx),
+            "export.pptx" => self.export_office_dialog(pdfcraft_engine::compare::OfficeFormat::Pptx),
             "export.html" => self.export_office_dialog(pdfcraft_engine::compare::OfficeFormat::Html),
             "export.rtf" => self.export_office_dialog(pdfcraft_engine::compare::OfficeFormat::Rtf),
             "form.prepare" => {
@@ -573,6 +588,7 @@ impl PdfCraftApp {
             "create.blank" => self.create_blank(),
             "create.file" => self.open_dialog(),
             "create.multiple" => self.create_multiple_dialog(),
+            "create.multiple_separate" => self.create_multiple_separate_dialog(),
             "create.images" => self.create_from_images_dialog(),
             "create.clipboard" => self.create_from_clipboard(),
             "optimize.reduce" => self.reduce_file_size(),
@@ -622,6 +638,20 @@ impl PdfCraftApp {
         true
     }
 
+    /// Shows the next tab (or the previous one) in the strip's order, wrapping around at either
+    /// end (#1542). The Combine files tab, when open, comes after the documents. From Home the
+    /// next tab is the first and the previous one the last.
+    fn step_tab(&mut self, forward: bool) {
+        let count = self.views.len() + usize::from(self.combine_tab.open);
+        let current = if self.combine_showing() { Some(self.views.len()) } else { self.active };
+        let Some(next) = tab_after(current, count, forward) else { return };
+        if next < self.views.len() {
+            self.active = Some(next);
+        } else {
+            self.open_combine_tab();
+        }
+    }
+
     /// Run the registered keyboard shortcuts (more specific combinations first).
     pub(crate) fn registry_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
@@ -669,6 +699,24 @@ impl PdfCraftApp {
             }
         }
     }
+}
+
+/// The tab after `current` of `count` (before it when `forward` is false), wrapping around. From
+/// no tab, forward is the first and back the last. `None` when there are no tabs.
+fn tab_after(current: Option<usize>, count: usize, forward: bool) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    Some(match (current.filter(|&i| i <= last), forward) {
+        (None, true) => 0,
+        (None, false) => last,
+        (Some(i), true) => {
+            if i == last {
+                0
+            } else {
+                i + 1
+            }
+        }
+        (Some(i), false) => i.checked_sub(1).unwrap_or(last),
+    })
 }
 
 /// Render a top-level menu's registered commands (with live labels, shortcuts and enablement).
@@ -746,5 +794,21 @@ mod tests {
         assert_eq!(command_shortcut_label(&ctx, "view.read_mode"), "⌃⌘H");
         assert_eq!(command_modifier_label(&ctx), "⌘");
         crate::i18n::set_current(previous);
+    }
+
+    /// Next and previous tab step one place and wrap around at either end; from no tab they go
+    /// to the first or the last (#1542).
+    #[test]
+    fn tab_steps_wrap_around_and_start_from_either_end() {
+        assert_eq!(tab_after(Some(0), 3, true), Some(1));
+        assert_eq!(tab_after(Some(2), 3, true), Some(0), "the last wraps to the first");
+        assert_eq!(tab_after(Some(1), 3, false), Some(0));
+        assert_eq!(tab_after(Some(0), 3, false), Some(2), "the first wraps to the last");
+        assert_eq!(tab_after(None, 3, true), Some(0));
+        assert_eq!(tab_after(None, 3, false), Some(2));
+        assert_eq!(tab_after(Some(0), 1, true), Some(0), "a single tab stays");
+        assert_eq!(tab_after(Some(7), 3, true), Some(0), "a stale index starts over");
+        assert_eq!(tab_after(None, 0, true), None);
+        assert_eq!(tab_after(Some(0), 0, false), None);
     }
 }
