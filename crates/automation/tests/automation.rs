@@ -233,6 +233,9 @@ fn tool_table_is_well_formed() {
         assert!(names.insert(t.name), "duplicate tool {}", t.name);
         assert!(t.name.len() <= 64 && t.name.chars().all(|c| c.is_ascii_lowercase() || c == '_'), "bad MCP tool name {}", t.name);
         assert_eq!(t.input_schema["type"], "object", "{}", t.name);
+        for keyword in ["oneOf", "anyOf", "allOf"] {
+            assert!(!t.input_schema.as_object().unwrap().contains_key(keyword), "{} has top-level {keyword}", t.name);
+        }
         let props = t.input_schema["properties"].as_object().unwrap();
         for r in t.input_schema["required"].as_array().unwrap() {
             assert!(props.contains_key(r.as_str().unwrap()), "{}: required {r} is not a property", t.name);
