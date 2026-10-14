@@ -394,6 +394,14 @@ pub(crate) fn page_input(
     if resp.clicked() {
         match hit {
             Some((i, _)) => {
+                // Switching to another item must save the box being typed (#2022), just as
+                // clicking empty space does.
+                if !cv.hold_blocked() {
+                    let typed = cv.draft.take().and_then(|d| finish(cv, d, added));
+                    if typed.is_some() {
+                        view.pending_edit = typed;
+                    }
+                }
                 cv.selected = Some((page, i));
                 consumed = true;
             }

@@ -100,6 +100,27 @@ fn clicking_elsewhere_keeps_the_text_and_starts_a_new_box() {
 }
 
 #[test]
+fn clicking_an_existing_item_commits_the_text_being_typed() {
+    // #2022: clicking another added item switched the selection without saving the new text.
+    let mut h = harness();
+    assert!(h.state_mut().execute("edit.text"));
+    h.run_steps(2);
+    let first = at(&h, 40.0, 100.0);
+    quick_click(&mut h, first);
+    h.event(egui::Event::Text("First".into()));
+    h.run_steps(2);
+    let second = at(&h, 40.0, 200.0);
+    quick_click(&mut h, second);
+    h.event(egui::Event::Text("Second".into()));
+    h.run_steps(2);
+    // Click the first item while the second box is still being edited.
+    quick_click(&mut h, first);
+    h.run_steps(1);
+    assert_eq!(texts(&h), ["First", "Second"], "the second box should be committed");
+    assert!(h.state().views[0].content.draft.is_none(), "selection should leave edit mode");
+}
+
+#[test]
 fn typing_moving_styling_and_deleting_added_content() {
     let mut h = harness();
     assert!(h.state_mut().execute("edit.text"));
